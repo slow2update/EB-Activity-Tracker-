@@ -36,6 +36,10 @@ alphabetized reports broken into Permanent Members / Guests / Alts.
 3. In the Railway project → **Variables** tab, add:
    - `DISCORD_TOKEN` = (from step A)
    - `ANTHROPIC_API_KEY` = (from step B)
+   - `GUILD_ID` = your Discord server's ID (recommended — makes slash command
+     updates apply in seconds instead of up to ~1 hour). To get it: in Discord,
+     enable **Developer Mode** (User Settings → Advanced → Developer Mode),
+     then right-click your server icon → **Copy Server ID**.
 4. Railway will detect `requirements.txt` and run `python bot.py`
    automatically. If it doesn't, set the start command manually to
    `python bot.py` under **Settings → Deploy**.
