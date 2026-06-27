@@ -32,8 +32,16 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 @bot.event
 async def on_ready():
     db.init_db()
-    await bot.tree.sync()
-    print(f"Logged in as {bot.user}. Slash commands synced.")
+    guild_id = os.environ.get("GUILD_ID")
+    if guild_id:
+        guild = discord.Object(id=int(guild_id))
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+        print(f"Logged in as {bot.user}. Slash commands synced to guild {guild_id} (fast, ~instant).")
+    else:
+        await bot.tree.sync()
+        print(f"Logged in as {bot.user}. Slash commands synced globally (can take up to 1hr to propagate). "
+              f"Set GUILD_ID env var for instant syncing during development.")
 
 
 # ---------------------------------------------------------------------------
