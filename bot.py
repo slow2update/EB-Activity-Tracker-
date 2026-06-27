@@ -35,13 +35,16 @@ async def on_ready():
     guild_id = os.environ.get("GUILD_ID")
     if guild_id:
         guild = discord.Object(id=int(guild_id))
-        # Clear any previously-registered GLOBAL commands so they don't show
-        # up duplicated alongside the guild-scoped ones. Safe to run every
-        # startup — it's a no-op once the global set is already empty.
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync(guild=None)
+        # IMPORTANT: copy_global_to must run BEFORE clear_commands(guild=None).
+        # clear_commands wipes Claude's in-memory command tree, not just what's
+        # sent to Discord -- clearing first leaves nothing for copy_global_to
+        # to copy, silently syncing an empty command set to the guild every time.
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
+        # Now that the guild has its own copy, clear the stale GLOBAL
+        # registration so commands don't appear duplicated globally too.
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync(guild=None)
         print(f"Logged in as {bot.user}. Slash commands synced to guild {guild_id} (fast, ~instant).")
     else:
         await bot.tree.sync()
