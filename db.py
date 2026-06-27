@@ -16,6 +16,53 @@ def init_db():
     with get_conn() as conn:
         with open(os.path.join(os.path.dirname(__file__), "schema.sql")) as f:
             conn.executescript(f.read())
+    _migrate_guest_to_hopper()
+
+
+def _migrate_guest_to_hopper():
+    """
+    One-time migration: older deployments used role='guest_main'. The CHECK
+    constraint only allows 'permanent_main', 'hopper_main', 'alt' now, so any
+    leftover 'guest_main' rows need rewriting. SQLite can't alter a CHECK
+    constraint in place, so we rebuild the accounts table if old rows exist.
+    Safe to run on every startup -- it's a no-op once migrated.
+    """
+    with get_conn() as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            old_rows = conn.execute(
+                "SELECT COUNT(*) AS c FROM accounts WHERE role = 'guest_main'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return  # accounts table doesn't exist yet, nothing to migrate
+        if old_rows["c"] == 0:
+            return
+
+        conn.executescript("""
+            ALTER TABLE accounts RENAME TO accounts_old_migration;
+
+            CREATE TABLE accounts (
+                account_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_name       TEXT NOT NULL UNIQUE,
+                owner_person_id INTEGER NOT NULL REFERENCES people(person_id),
+                role            TEXT NOT NULL CHECK (role IN ('permanent_main', 'hopper_main', 'alt')),
+                is_alt          INTEGER NOT NULL DEFAULT 0 CHECK (is_alt IN (0,1)),
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            INSERT INTO accounts SELECT
+                account_id, game_name, owner_person_id,
+                CASE WHEN role = 'guest_main' THEN 'hopper_main' ELSE role END,
+                is_alt, created_at
+            FROM accounts_old_migration;
+
+            DROP TABLE accounts_old_migration;
+
+            CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_person_id);
+            CREATE INDEX IF NOT EXISTS idx_accounts_role ON accounts(role);
+        """)
+        conn.execute("PRAGMA foreign_keys = ON")
+    print(f"[migration] Converted {old_rows['c']} 'guest_main' account(s) to 'hopper_main'.")
 
 
 @contextmanager
@@ -57,11 +104,11 @@ def get_account_by_name(game_name: str):
 
 
 def get_person_main_account(person_id: int):
-    """A person's main account is the one with role permanent_main or guest_main."""
+    """A person's main account is the one with role permanent_main or hopper_main."""
     with get_conn() as conn:
         return conn.execute(
             """SELECT * FROM accounts
-               WHERE owner_person_id = ? AND role IN ('permanent_main', 'guest_main')""",
+               WHERE owner_person_id = ? AND role IN ('permanent_main', 'hopper_main')""",
             (person_id,),
         ).fetchone()
 
@@ -70,7 +117,7 @@ def register_main_account(discord_id: str, game_name: str, as_permanent: bool = 
     """
     /register — link a discord user's identity to their in-game main name.
     Creates the person if needed. If the account name already exists and is
-    unowned-by-discord (e.g. created earlier from a screenshot as a guest),
+    unowned-by-discord (e.g. created earlier from a screenshot as a hopper),
     this just attaches the discord_id to that existing person.
     Returns (success: bool, message: str).
     """
@@ -89,7 +136,7 @@ def register_main_account(discord_id: str, game_name: str, as_permanent: bool = 
             return True, f"Linked your Discord account to existing game name '{game_name}'."
         return True, f"You're already registered as '{game_name}'."
 
-    role = "permanent_main" if as_permanent else "guest_main"
+    role = "permanent_main" if as_permanent else "hopper_main"
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO accounts (game_name, owner_person_id, role, is_alt) VALUES (?, ?, ?, 0)",
@@ -99,7 +146,11 @@ def register_main_account(discord_id: str, game_name: str, as_permanent: bool = 
 
 
 def add_alt_for_discord_user(discord_id: str, alt_game_name: str):
-    """/addalt — add an alt under the caller's own main account."""
+    """
+    /addalt — add an alt under the caller's own main account.
+    Does NOT change the caller's role — a hopper adding an alt stays a
+    hopper. Promotion to permanent only happens via /addmember or /roster add.
+    """
     with get_conn() as conn:
         person = conn.execute(
             "SELECT person_id FROM people WHERE discord_id = ?", (discord_id,)
@@ -140,7 +191,12 @@ def add_permanent_member(game_name: str):
 
 
 def link_alt(alt_name: str, owner_name: str):
-    """Admin override: /alt link <alt> <owner>. Owner can be permanent or guest main."""
+    """
+    Admin override: /alt link <alt> <owner>. Owner can be permanent or hopper main.
+    Linking an alt does NOT change the owner's role — a hopper with a linked
+    alt stays a hopper. Promotion to permanent only happens via /addmember
+    or /roster add, never as a side effect of alt-linking.
+    """
     owner_account = get_account_by_name(owner_name)
     if not owner_account:
         return False, f"Owner account '{owner_name}' not found. Add them first."
@@ -167,14 +223,18 @@ def unlink_alt(alt_name: str):
     if not account or not account["is_alt"]:
         return False, f"'{alt_name}' is not currently registered as an alt."
     with get_conn() as conn:
-        # Unlinking promotes it to its own guest_main under a fresh person record.
+        # Unlinking demotes the alt itself to its own hopper_main under a
+        # fresh person record. The former owner's role is untouched — alt
+        # linking/unlinking never affects whether someone is permanent or
+        # hopper; that's only ever set via /addmember, /roster add, or this
+        # unlink (which only affects the alt, not the owner).
         cur = conn.execute("INSERT INTO people (display_name) VALUES (?)", (alt_name,))
         new_person_id = cur.lastrowid
         conn.execute(
-            "UPDATE accounts SET owner_person_id = ?, role = 'guest_main', is_alt = 0 WHERE account_id = ?",
+            "UPDATE accounts SET owner_person_id = ?, role = 'hopper_main', is_alt = 0 WHERE account_id = ?",
             (new_person_id, account["account_id"]),
         )
-    return True, f"Unlinked '{alt_name}'. It's now tracked as its own guest account."
+    return True, f"Unlinked '{alt_name}'. It's now tracked as its own hopper account."
 
 
 def list_alts(owner_name: str):
@@ -188,6 +248,27 @@ def list_alts(owner_name: str):
             (owner_account["owner_person_id"],),
         ).fetchall()
     return [r["game_name"] for r in rows]
+
+
+def get_or_create_hopper_account(game_name: str):
+    """
+    Returns the account row for game_name, creating it as a fresh hopper_main
+    if it doesn't exist yet. Used during screenshot processing: any name that
+    doesn't match an existing account is automatically classified as a hopper
+    rather than left in limbo. Exact-match only — this never fuzzy-matches a
+    near-identical name to an existing account.
+    """
+    existing = get_account_by_name(game_name)
+    if existing:
+        return existing
+    with get_conn() as conn:
+        cur = conn.execute("INSERT INTO people (display_name) VALUES (?)", (game_name,))
+        person_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO accounts (game_name, owner_person_id, role, is_alt) VALUES (?, ?, 'hopper_main', 0)",
+            (game_name, person_id),
+        )
+    return get_account_by_name(game_name)
 
 
 # ---------------------------------------------------------------------------
@@ -234,27 +315,19 @@ def get_pending_reviews(eb_id: int = None):
         return conn.execute("SELECT * FROM pending_review WHERE status = 'pending'").fetchall()
 
 
-def resolve_pending_as_guest(pending_id: int):
+def resolve_pending_as_hopper(pending_id: int):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM pending_review WHERE pending_id = ?", (pending_id,)).fetchone()
         if not row:
             return False, "Pending entry not found."
-    ok, msg = add_permanent_member(row["extracted_name"])  # creates person+account
-    # Downgrade role to guest_main since this path is for non-permanent hoppers
+    account = get_or_create_hopper_account(row["extracted_name"])
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE accounts SET role = 'guest_main' WHERE game_name = ?",
-            (row["extracted_name"],),
-        )
-        account = conn.execute(
-            "SELECT account_id FROM accounts WHERE game_name = ?", (row["extracted_name"],)
-        ).fetchone()
         conn.execute(
             "INSERT INTO participations (eb_id, account_id, successful_actions, rank_in_eb) VALUES (?, ?, ?, ?)",
             (row["eb_id"], account["account_id"], row["successful_actions"], row["rank_in_eb"]),
         )
         conn.execute("UPDATE pending_review SET status = 'resolved' WHERE pending_id = ?", (pending_id,))
-    return True, f"Added '{row['extracted_name']}' as a guest and recorded their participation."
+    return True, f"Added '{row['extracted_name']}' as a hopper and recorded their participation."
 
 
 def resolve_pending_as_alt(pending_id: int, owner_name: str):
@@ -302,7 +375,7 @@ def resolve_pending_as_correction(pending_id: int, correct_name: str):
 
 def build_activity_report(days: int):
     """
-    Returns dict with three alphabetically-sorted lists: permanent, guest, alt.
+    Returns dict with three alphabetically-sorted lists: permanent, hopper, alt.
     Each entry: game_name, ebs_attended, ebs_total, avg_actions, owner_name (alts only).
     """
     cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -324,14 +397,14 @@ def build_activity_report(days: int):
                   AND pa.eb_id IN (SELECT eb_id FROM epic_battles WHERE eb_date >= ?)
             LEFT JOIN accounts owner_acct
                    ON a.is_alt = 1 AND owner_acct.owner_person_id = a.owner_person_id
-                  AND owner_acct.role IN ('permanent_main', 'guest_main')
+                  AND owner_acct.role IN ('permanent_main', 'hopper_main')
             GROUP BY a.account_id
             ORDER BY a.game_name COLLATE NOCASE ASC
             """,
             (cutoff,),
         ).fetchall()
 
-    permanent, guest, alt = [], [], []
+    permanent, hopper, alt = [], [], []
     for r in rows:
         entry = {
             "game_name": r["game_name"],
@@ -341,10 +414,10 @@ def build_activity_report(days: int):
         }
         if r["role"] == "permanent_main":
             permanent.append(entry)
-        elif r["role"] == "guest_main":
-            guest.append(entry)
+        elif r["role"] == "hopper_main":
+            hopper.append(entry)
         else:
             entry["owner_name"] = r["owner_name"]
             alt.append(entry)
 
-    return {"total_ebs": total_ebs, "permanent": permanent, "guest": guest, "alt": alt}
+    return {"total_ebs": total_ebs, "permanent": permanent, "hopper": hopper, "alt": alt}

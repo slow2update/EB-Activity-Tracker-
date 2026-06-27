@@ -35,6 +35,11 @@ async def on_ready():
     guild_id = os.environ.get("GUILD_ID")
     if guild_id:
         guild = discord.Object(id=int(guild_id))
+        # Clear any previously-registered GLOBAL commands so they don't show
+        # up duplicated alongside the guild-scoped ones. Safe to run every
+        # startup — it's a no-op once the global set is already empty.
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync(guild=None)
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
         print(f"Logged in as {bot.user}. Slash commands synced to guild {guild_id} (fast, ~instant).")
@@ -189,20 +194,28 @@ async def process_eb(interaction: discord.Interaction):
     entries, errors = extraction.extract_from_batch(batch["paths"])
     eb_id = db.create_eb(batch["eb_date"], batch["eb_label"])
 
-    matched, unmatched = 0, 0
+    matched, new_hoppers, unreadable = 0, 0, 0
     for entry in entries:
         name = entry.get("name")
         actions = entry.get("successful_actions")
         rank = entry.get("rank")
         if name is None or actions is None:
+            # Genuinely unreadable extraction (e.g. cut-off text) — this needs
+            # a human to look at the screenshot, so it goes to manual review
+            # rather than being silently dropped or guessed at.
+            db.add_pending_review(eb_id, name or "(unreadable name)", actions or 0, rank)
+            unreadable += 1
             continue
         account = db.get_account_by_name(name)
         if account:
-            db.record_participation(eb_id, account["account_id"], actions, rank)
             matched += 1
         else:
-            db.add_pending_review(eb_id, name, actions, rank)
-            unmatched += 1
+            # No exact match against any known account -> auto-classify as a
+            # hopper. This is a brand-new account the bot has never seen
+            # before, not an ambiguous read, so no manual step is needed.
+            account = db.get_or_create_hopper_account(name)
+            new_hoppers += 1
+        db.record_participation(eb_id, account["account_id"], actions, rank)
 
     del PENDING_BATCHES[interaction.channel_id]
 
@@ -210,21 +223,22 @@ async def process_eb(interaction: discord.Interaction):
     summary = (
         f"**EB processed** ({batch['eb_date']}{label_suffix})\n"
         f"Matched to existing accounts: {matched}\n"
-        f"Unrecognized names needing review: {unmatched}\n"
+        f"New hoppers auto-added: {new_hoppers}\n"
+        f"Unreadable entries needing manual review: {unreadable}\n"
     )
     if errors:
         summary += f"\n⚠️ {len(errors)} image(s) failed to process:\n" + "\n".join(errors)
-    if unmatched:
-        summary += "\nRun `/review_pending` to triage unrecognized names."
+    if unreadable:
+        summary += "\nRun `/review_pending` to manually resolve unreadable entries."
 
     await interaction.followup.send(summary)
 
 
 # ---------------------------------------------------------------------------
-# Reviewing unrecognized names
+# Reviewing unreadable extractions
 # ---------------------------------------------------------------------------
 
-@bot.tree.command(name="review_pending", description="See names from screenshots that didn't match any known account.")
+@bot.tree.command(name="review_pending", description="See screenshot entries that couldn't be read clearly enough to auto-process.")
 async def review_pending(interaction: discord.Interaction):
     pending = db.get_pending_reviews()
     if not pending:
@@ -234,18 +248,18 @@ async def review_pending(interaction: discord.Interaction):
     lines = [f"`#{p['pending_id']}` **{p['extracted_name']}** — {p['successful_actions']} actions (rank {p['rank_in_eb']})"
               for p in pending[:25]]
     msg = (
-        "**Pending unrecognized names:**\n" + "\n".join(lines) +
+        "**Pending unreadable entries:**\n" + "\n".join(lines) +
         "\n\nResolve each with one of:\n"
-        "`/resolve_as_guest id:<#>`\n"
+        "`/resolve_as_hopper id:<#>`\n"
         "`/resolve_as_alt id:<#> owner_name:<name>`\n"
         "`/resolve_as_correction id:<#> correct_name:<name>`"
     )
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-@bot.tree.command(name="resolve_as_guest", description="Resolve a pending name as a new guest (non-permanent) member.")
-async def resolve_as_guest(interaction: discord.Interaction, id: int):
-    ok, msg = db.resolve_pending_as_guest(id)
+@bot.tree.command(name="resolve_as_hopper", description="Resolve a pending entry as a new hopper (non-permanent) member.")
+async def resolve_as_hopper(interaction: discord.Interaction, id: int):
+    ok, msg = db.resolve_pending_as_hopper(id)
     await interaction.response.send_message(msg, ephemeral=True)
 
 
@@ -286,7 +300,7 @@ async def activity_report(interaction: discord.Interaction, days: int = 14):
     body = (
         format_section("PERMANENT MEMBERS", report["permanent"])
         + "\n"
-        + format_section("GUESTS", report["guest"])
+        + format_section("HOPPERS", report["hopper"])
         + "\n"
         + format_section("ALTS", report["alt"], show_owner=True)
     )

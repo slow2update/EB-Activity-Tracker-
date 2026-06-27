@@ -12,13 +12,14 @@ CREATE TABLE IF NOT EXISTS people (
 
 -- An "account" is an in-game name as it appears in EB screenshots.
 -- Every account has exactly one owner (a person) and a role.
--- role = 'permanent_main' | 'guest_main' | 'alt'
--- For alts, owner_person_id points to whoever owns them (permanent or guest).
+-- role = 'permanent_main' | 'hopper_main' | 'alt'
+-- "hopper" = a non-permanent member who shows up in EBs without being on the roster.
+-- For alts, owner_person_id points to whoever owns them (permanent or hopper).
 CREATE TABLE IF NOT EXISTS accounts (
     account_id      INTEGER PRIMARY KEY AUTOINCREMENT,
     game_name       TEXT NOT NULL UNIQUE,   -- exact in-game name, case-sensitive match
     owner_person_id INTEGER NOT NULL REFERENCES people(person_id),
-    role            TEXT NOT NULL CHECK (role IN ('permanent_main', 'guest_main', 'alt')),
+    role            TEXT NOT NULL CHECK (role IN ('permanent_main', 'hopper_main', 'alt')),
     is_alt          INTEGER NOT NULL DEFAULT 0 CHECK (is_alt IN (0,1)),
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -49,7 +50,10 @@ CREATE INDEX IF NOT EXISTS idx_participations_eb ON participations(eb_id);
 CREATE INDEX IF NOT EXISTS idx_participations_account ON participations(account_id);
 
 -- Staging table: names extracted from a screenshot batch that didn't match
--- any known account, awaiting admin/triage decision (new guest / new alt / typo-correction).
+-- any known account. As of this version, unmatched names are auto-classified
+-- as hoppers rather than sitting here unresolved. This table is now used
+-- only when extraction itself is ambiguous (e.g. unreadable name), and stays
+-- available for manual admin correction via /review_pending.
 CREATE TABLE IF NOT EXISTS pending_review (
     pending_id          INTEGER PRIMARY KEY AUTOINCREMENT,
     eb_id               INTEGER NOT NULL REFERENCES epic_battles(eb_id),

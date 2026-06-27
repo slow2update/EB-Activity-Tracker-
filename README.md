@@ -2,7 +2,7 @@
 
 Automates EB (Epic Battle) activity checks: upload roster screenshots,
 the bot reads them, tallies participation per member, and produces
-alphabetized reports broken into Permanent Members / Guests / Alts.
+alphabetized reports broken into Permanent Members / Hoppers / Alts.
 
 ---
 
@@ -82,20 +82,42 @@ manually.)
 2. Post all your scrolling screenshots for that EB as image attachments,
    in any order, in that same channel. The bot reacts ✅ to each one it
    picks up.
-3. Run `/process_eb`. The bot reads every screenshot, matches names
-   against known accounts, and tells you how many matched vs. need review.
+3. Run `/process_eb`. The bot reads every screenshot and, for each name:
+   - **Matches an existing account** → records their participation.
+   - **Doesn't match anything known** → automatically creates them as a
+     **Hopper** (non-permanent member) and records participation. No manual
+     step needed — this is the normal path for new/occasional players.
+   - **Genuinely unreadable** (cut-off text, garbled OCR) → goes to
+     `/review_pending` for a human to sort out, since guessing at an
+     unreadable name risks misattributing stats.
 
-### Triaging unrecognized names
-Run `/review_pending` to see any names the bot couldn't match. For each:
-- `/resolve_as_guest id:<#>` — it's a new non-member hopper
+### Hoppers, alts, and how someone becomes permanent
+Any name the bot has never seen gets auto-classified as a **Hopper**. Hoppers
+are tracked just like permanent members (attendance, average actions) so you
+can see your most active non-members — but they're reported separately.
+
+**Hoppers can have alts and remain hoppers.** Linking an alt — whether via
+admin `/alt link alt_name:X owner_name:HopperName` or self-service `/addalt`
+— never changes the owner's permanent/hopper status either way. The two are
+fully independent: an account's role (permanent vs. hopper) is only ever set
+by `/addmember` / `/roster add` (promotes to permanent) or by being newly
+auto-created from a screenshot (starts as hopper). Alt accounts themselves
+can belong to either a permanent member or a hopper.
+
+### Resolving unreadable entries
+Run `/review_pending` to see any screenshot entries the bot couldn't read
+clearly enough to process automatically. For each:
+- `/resolve_as_hopper id:<#>` — treat it as a new hopper despite the unclear read
 - `/resolve_as_alt id:<#> owner_name:<existing_name>` — it's someone's alt
+  (owner can be permanent or hopper)
 - `/resolve_as_correction id:<#> correct_name:<existing_name>` — it was a
   misread of an existing name (e.g. OCR confused `-ALCH3MY-` for
   `-ALCH3MY1-`)
 
 ### Self-service (any member can run these)
 - `/register game_name:MyIGN` — link your Discord account to your main
-- `/addalt alt_game_name:MyAltIGN` — add your own alt
+- `/addalt alt_game_name:MyAltIGN` — add your own alt (does not change your
+  permanent/hopper status either way)
 - `/addmember game_name:NewPersonIGN` — add someone new to the permanent roster
 
 ### Admin alt management
@@ -105,7 +127,7 @@ Run `/review_pending` to see any names the bot couldn't match. For each:
 
 ### Reports
 `/activity_report days:14` — posts (or attaches, if long) three
-alphabetized lists: Permanent Members, Guests, and Alts, each showing
+alphabetized lists: Permanent Members, Hoppers, and Alts, each showing
 EBs attended out of total EBs run in that window, and average successful
 actions per EB.
 
