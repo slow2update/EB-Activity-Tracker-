@@ -61,6 +61,41 @@ async def addmember(interaction: discord.Interaction, game_name: str):
     await interaction.response.send_message(msg, ephemeral=True)
 
 
+@bot.tree.command(name="bulk_addmember", description="Add multiple permanent members at once, one name per line.")
+@app_commands.describe(names="Paste names, one per line (or comma-separated)")
+async def bulk_addmember(interaction: discord.Interaction, names: str):
+    # Split on newlines first, then also allow commas, in case someone pastes
+    # a comma-separated list instead of one-per-line.
+    raw_lines = names.replace(",", "\n").splitlines()
+    candidates = [line.strip() for line in raw_lines if line.strip()]
+
+    if not candidates:
+        await interaction.response.send_message("No names found in that input.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    added, skipped = [], []
+    for name in candidates:
+        ok, msg = db.add_permanent_member(name)
+        (added if ok else skipped).append(name)
+
+    summary = f"**Bulk add complete** — {len(added)} added, {len(skipped)} skipped (already existed).\n"
+    if added:
+        summary += "\n**Added:**\n" + ", ".join(added)
+    if skipped:
+        summary += "\n\n**Skipped (already registered):**\n" + ", ".join(skipped)
+
+    if len(summary) > 1900:
+        buf = io.BytesIO(summary.encode("utf-8"))
+        await interaction.followup.send(
+            "Bulk add report attached (too long for inline message):",
+            file=discord.File(buf, filename="bulk_add_report.txt"),
+        )
+    else:
+        await interaction.followup.send(summary)
+
+
 # ---------------------------------------------------------------------------
 # Admin-style commands — open to all per current settings, kept as separate
 # group for clarity and in case you want to restrict later with @app_commands.checks
